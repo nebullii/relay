@@ -1,0 +1,34 @@
+# Binary
+relay
+relay.exe
+dist/
+
+# Go
+*.test
+*.out
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+
+# Node
+node_modules/
+sdk/ts/relay-client/dist/
+
+# Runtime data
+~/.relay/
+*.db
+*.pid
+*.log
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
