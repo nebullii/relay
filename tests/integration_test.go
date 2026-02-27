@@ -281,9 +281,13 @@ func TestIntegration_ReportGeneration(t *testing.T) {
 	result, _ := apiRequest(t, ts, "POST", "/threads", map[string]string{"name": "report-test"})
 	threadID := result["thread_id"].(string)
 
+	// Content must exceed MaxPreviewBytes (2048) so the preview is truncated
+	// and avoided_tokens > 0. Use ~4KB to ensure a meaningful reduction.
+	largeContent := strings.Repeat("# Analysis\n\nThis is analysis content that exceeds the preview cap.\n\n", 60)
+
 	apiRequest(t, ts, "POST", "/threads/"+threadID+"/artifacts", map[string]any{
 		"name": "analysis.md", "type": "markdown", "mime": "text/markdown",
-		"content": strings.Repeat("# Analysis\n\nThis is analysis content.\n\n", 10),
+		"content": largeContent,
 	})
 
 	reportResult, status := apiRequest(t, ts, "POST", "/reports/"+threadID, map[string]string{"format": "md"})
@@ -298,11 +302,28 @@ func TestIntegration_ReportGeneration(t *testing.T) {
 		t.Errorf("expected format md, got %v", reportResult["format"])
 	}
 
-	// Verify token savings are computed
-	if savings, ok := reportResult["token_savings"].(map[string]any); ok {
-		if savings["naive_tokens"] == nil {
-			t.Error("expected naive_tokens in token_savings")
-		}
+	// Verify token savings are computed and that truncation produced real savings.
+	// naive_tokens counts the full artifact size; actual_tokens counts the preview
+	// bytes actually sent. For content > MaxPreviewBytes, avoided_tokens must be > 0.
+	savings, ok := reportResult["token_savings"].(map[string]any)
+	if !ok {
+		t.Fatal("expected token_savings in report result")
+	}
+	naiveTokens, _ := savings["naive_tokens"].(float64)
+	actualTokens, _ := savings["actual_tokens"].(float64)
+	avoidedTokens, _ := savings["avoided_tokens"].(float64)
+
+	if naiveTokens <= 0 {
+		t.Errorf("expected naive_tokens > 0, got %v", naiveTokens)
+	}
+	if actualTokens <= 0 {
+		t.Errorf("expected actual_tokens > 0, got %v", actualTokens)
+	}
+	if avoidedTokens <= 0 {
+		t.Errorf("expected avoided_tokens > 0 for artifact exceeding MaxPreviewBytes, got %v", avoidedTokens)
+	}
+	if avoidedTokens >= naiveTokens {
+		t.Errorf("avoided_tokens (%v) should be less than naive_tokens (%v)", avoidedTokens, naiveTokens)
 	}
 }
 
