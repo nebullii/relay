@@ -95,6 +95,7 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/cap/invoke", s.authMiddleware(s.handleCapInvoke))
 	s.mux.HandleFunc("/cap/list", s.authMiddleware(s.handleCapList))
 	s.mux.HandleFunc("/reports/", s.authMiddleware(s.handleReport))
+	s.mux.HandleFunc("/render/", s.authMiddleware(s.handleRender))
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/version", s.handleVersion)
 
@@ -152,6 +153,13 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		subsub = parts[2]
 	}
 
+	// Split subsub into ref + optional action (e.g. "sha256:abc/content")
+	artifactRef, artifactAction := subsub, ""
+	if idx := strings.Index(subsub, "/"); idx >= 0 {
+		artifactRef = subsub[:idx]
+		artifactAction = subsub[idx+1:]
+	}
+
 	switch {
 	case sub == "" && r.Method == http.MethodGet:
 		s.getThread(w, r, threadID)
@@ -165,8 +173,10 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		s.uploadArtifact(w, r, threadID)
 	case sub == "artifacts" && subsub == "" && r.Method == http.MethodGet:
 		s.listArtifacts(w, r, threadID)
-	case sub == "artifacts" && subsub != "":
-		s.getArtifact(w, r, threadID, subsub)
+	case sub == "artifacts" && artifactRef != "" && artifactAction == "content":
+		s.getArtifactContent(w, r, threadID, artifactRef)
+	case sub == "artifacts" && artifactRef != "" && artifactAction == "":
+		s.getArtifact(w, r, threadID, artifactRef)
 	case sub == "events" && r.Method == http.MethodGet:
 		s.listEvents(w, r, threadID)
 	default:
@@ -286,7 +296,11 @@ func (s *Server) getStateHeader(w http.ResponseWriter, r *http.Request, threadID
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, st.Header())
+	h := st.Header()
+	if h.Truncated {
+		w.Header().Set("X-Relay-Truncated", "true")
+	}
+	writeJSON(w, http.StatusOK, h)
 }
 
 func (s *Server) patchState(w http.ResponseWriter, r *http.Request, threadID string) {
@@ -314,6 +328,8 @@ func (s *Server) patchState(w http.ResponseWriter, r *http.Request, threadID str
 	})
 }
 
+const maxArtifactBytes = 50 << 20 // 50MB
+
 func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request, threadID string) {
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		// Try JSON body
@@ -325,6 +341,10 @@ func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request, threadID
 		}
 		if err2 := json.NewDecoder(r.Body).Decode(&req); err2 != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if len(req.Content) > maxArtifactBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "artifact exceeds 50MB limit")
 			return
 		}
 		prov := artifacts.Provenance{
@@ -360,6 +380,10 @@ func (s *Server) uploadArtifact(w http.ResponseWriter, r *http.Request, threadID
 		return
 	}
 	defer file.Close()
+	if header.Size > maxArtifactBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "artifact exceeds 50MB limit")
+		return
+	}
 
 	atype := artifacts.ArtifactType(r.FormValue("type"))
 	if atype == "" {
@@ -402,22 +426,6 @@ func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request, threadID 
 }
 
 func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request, threadID, ref string) {
-	// Check if requesting raw content
-	if r.URL.Query().Get("raw") == "1" {
-		rc, err := s.artStore.Open(threadID, ref)
-		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
-			return
-		}
-		defer rc.Close()
-		art, _ := s.artStore.Get(threadID, ref)
-		if art != nil {
-			w.Header().Set("Content-Type", art.Mime)
-		}
-		io.Copy(w, rc)
-		return
-	}
-
 	art, err := s.artStore.Get(threadID, ref)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
@@ -427,6 +435,26 @@ func (s *Server) getArtifact(w http.ResponseWriter, r *http.Request, threadID, r
 	artCopy := *art
 	artCopy.Path = ""
 	writeJSON(w, http.StatusOK, artCopy)
+}
+
+// getArtifactContent serves raw artifact bytes.
+// Requires Accept: application/octet-stream to prevent accidental inlining.
+func (s *Server) getArtifactContent(w http.ResponseWriter, r *http.Request, threadID, ref string) {
+	if r.Header.Get("Accept") != "application/octet-stream" {
+		writeError(w, http.StatusNotAcceptable, "raw content requires Accept: application/octet-stream")
+		return
+	}
+	rc, err := s.artStore.Open(threadID, ref)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	defer rc.Close()
+	art, _ := s.artStore.Get(threadID, ref)
+	if art != nil {
+		w.Header().Set("Content-Type", art.Mime)
+	}
+	io.Copy(w, rc)
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, threadID string) {
@@ -697,6 +725,82 @@ func (s *Server) buildMarkdownReport(threadID string, st *state.State, arts []*a
 			ev.Timestamp.Format("15:04:05"), ev.Type, truncate(string(ev.Payload), 80)))
 	}
 	return sb.String()
+}
+
+// --- Render ---
+
+// handleRender serves POST /render/:thread_id?format=openai
+// Returns an OpenAI-compatible messages array with bounded state header
+// as the system message and artifact refs+previews in the user turn.
+// Full artifact content is never included — only refs and 2KB previews.
+func (s *Server) handleRender(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+	threadID := strings.TrimPrefix(r.URL.Path, "/render/")
+	if threadID == "" {
+		writeError(w, http.StatusBadRequest, "thread_id required")
+		return
+	}
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "openai"
+	}
+	if format != "openai" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported format %q — only 'openai' supported in v1", format))
+		return
+	}
+
+	st, err := s.states.Get(threadID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	arts, err := s.artStore.List(threadID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	h := st.Header()
+	headerJSON, err := json.Marshal(h)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to render state header")
+		return
+	}
+
+	// Build user turn: artifact refs + previews only, never full content.
+	var userParts []string
+	for _, art := range arts {
+		preview := art.Preview.Text
+		if preview == "" {
+			preview = fmt.Sprintf("[binary, %d bytes]", art.Size)
+		}
+		part := fmt.Sprintf("[artifact:%s | %s]\n%s", art.Ref, art.Name, preview)
+		userParts = append(userParts, part)
+	}
+
+	systemContent := string(headerJSON)
+	userContent := ""
+	if len(userParts) > 0 {
+		userContent = "## Artifacts\n\n" + strings.Join(userParts, "\n\n---\n\n")
+	}
+
+	messages := []map[string]string{
+		{"role": "system", "content": systemContent},
+	}
+	if userContent != "" {
+		messages = append(messages, map[string]string{"role": "user", "content": userContent})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"thread_id": threadID,
+		"format":    format,
+		"truncated": h.Truncated,
+		"messages":  messages,
+	})
 }
 
 // --- Health / Version / UI ---

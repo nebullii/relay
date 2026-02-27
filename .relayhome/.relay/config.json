@@ -1,0 +1,6 @@
+{
+  "port": 7474,
+  "base_dir": "/Users/nehachaudhari/Developer/relay/.relayhome/.relay",
+  "api_token": "",
+  "host": "http://localhost"
+}

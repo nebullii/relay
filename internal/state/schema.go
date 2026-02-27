@@ -80,16 +80,17 @@ type Metrics struct {
 
 // Header is a bounded, token-efficient view of state.
 type Header struct {
-	Schema        string   `json:"$schema"`
-	ThreadID      string   `json:"thread_id"`
-	Version       int      `json:"version"`
-	TopFacts      []Fact   `json:"top_facts"`
-	TopConstraints []Constraint `json:"top_constraints"`
-	OpenQuestions []Question   `json:"open_questions"`
-	NextSteps     []PlanStep   `json:"next_steps"`
-	ArtifactRefs  []ArtifactRef `json:"artifact_refs"`
-	LastActions   []Action     `json:"last_actions"`
-	Metrics       Metrics      `json:"metrics"`
+	Schema         string        `json:"$schema"`
+	ThreadID       string        `json:"thread_id"`
+	Version        int           `json:"version"`
+	TopFacts       []Fact        `json:"top_facts"`
+	TopConstraints []Constraint  `json:"top_constraints"`
+	OpenQuestions  []Question    `json:"open_questions"`
+	NextSteps      []PlanStep    `json:"next_steps"`
+	ArtifactRefs   []ArtifactRef `json:"artifact_refs"`
+	LastActions    []Action      `json:"last_actions"`
+	Metrics        Metrics       `json:"metrics"`
+	Truncated      bool          `json:"truncated,omitempty"` // true when facts were dropped to meet MaxHeaderBytes
 }
 
 const (
@@ -118,7 +119,12 @@ func NewState(threadID string) *State {
 	}
 }
 
+// MaxHeaderBytes is the hard JSON size cap for a rendered state header.
+const MaxHeaderBytes = 2048
+
 // Header returns a bounded view of state for use in agent prompts.
+// Field counts are capped first; then if the JSON still exceeds MaxHeaderBytes,
+// oldest facts are dropped one by one until it fits.
 func (s *State) Header() *Header {
 	h := &Header{
 		Schema:   SchemaVersion,
@@ -127,21 +133,21 @@ func (s *State) Header() *Header {
 		Metrics:  s.Metrics,
 	}
 
-	// Bounded facts (most recent first)
+	// Bounded facts — keep newest, drop oldest when over limit.
 	facts := s.Facts
 	if len(facts) > MaxHeaderFacts {
 		facts = facts[len(facts)-MaxHeaderFacts:]
 	}
 	h.TopFacts = facts
 
-	// Bounded constraints
+	// Bounded constraints — keep oldest (highest priority rules).
 	constraints := s.Constraints
 	if len(constraints) > MaxHeaderConstraints {
 		constraints = constraints[:MaxHeaderConstraints]
 	}
 	h.TopConstraints = constraints
 
-	// Open questions only
+	// Open questions only.
 	for _, q := range s.OpenQuestions {
 		if q.Status == "open" || q.Status == "" {
 			h.OpenQuestions = append(h.OpenQuestions, q)
@@ -151,7 +157,7 @@ func (s *State) Header() *Header {
 		}
 	}
 
-	// Pending plan steps
+	// Pending plan steps.
 	for _, p := range s.Plan {
 		if p.Status == "pending" || p.Status == "" {
 			h.NextSteps = append(h.NextSteps, p)
@@ -161,19 +167,29 @@ func (s *State) Header() *Header {
 		}
 	}
 
-	// Recent artifacts
+	// Recent artifacts.
 	artifacts := s.Artifacts
 	if len(artifacts) > MaxHeaderArtifacts {
 		artifacts = artifacts[len(artifacts)-MaxHeaderArtifacts:]
 	}
 	h.ArtifactRefs = artifacts
 
-	// Recent actions
+	// Recent actions.
 	actions := s.LastActions
 	if len(actions) > MaxHeaderActions {
 		actions = actions[len(actions)-MaxHeaderActions:]
 	}
 	h.LastActions = actions
+
+	// Hard JSON size cap: drop oldest facts one by one until header fits.
+	for len(h.TopFacts) > 0 {
+		data, err := json.Marshal(h)
+		if err != nil || len(data) <= MaxHeaderBytes {
+			break
+		}
+		h.TopFacts = h.TopFacts[1:] // drop oldest
+		h.Truncated = true
+	}
 
 	return h
 }

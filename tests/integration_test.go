@@ -327,6 +327,100 @@ func TestIntegration_ReportGeneration(t *testing.T) {
 	}
 }
 
+func TestIntegration_Render(t *testing.T) {
+	ts, _ := setupServer(t)
+
+	result, _ := apiRequest(t, ts, "POST", "/threads", map[string]string{"name": "render-test"})
+	threadID := result["thread_id"].(string)
+
+	// Store a large artifact so the preview is truncated.
+	largeContent := strings.Repeat("Important context for the agent.\n", 100)
+	artResult, _ := apiRequest(t, ts, "POST", "/threads/"+threadID+"/artifacts", map[string]any{
+		"name": "context.md", "type": "markdown", "mime": "text/markdown",
+		"content": largeContent,
+	})
+	ref := artResult["ref"].(string)
+
+	// Render in OpenAI format.
+	renderResult, status := apiRequest(t, ts, "POST", "/render/"+threadID+"?format=openai", nil)
+	if status != 200 {
+		t.Fatalf("expected 200, got %d: %v", status, renderResult)
+	}
+
+	messages, ok := renderResult["messages"].([]any)
+	if !ok || len(messages) < 2 {
+		t.Fatalf("expected at least 2 messages, got %v", renderResult["messages"])
+	}
+
+	// System message must be the bounded state header.
+	system := messages[0].(map[string]any)
+	if system["role"] != "system" {
+		t.Errorf("first message must be system role, got %v", system["role"])
+	}
+
+	// User message must contain the artifact ref and preview.
+	user := messages[1].(map[string]any)
+	if user["role"] != "user" {
+		t.Errorf("second message must be user role, got %v", user["role"])
+	}
+	userContent := user["content"].(string)
+	if !strings.Contains(userContent, ref) {
+		t.Errorf("user turn must contain artifact ref %s", ref)
+	}
+
+	// CRITICAL: full artifact body must NOT appear in the rendered output.
+	// Only the 2KB preview is allowed — never the full content.
+	if strings.Contains(userContent, largeContent) {
+		t.Error("rendered prompt must not contain full artifact body — only ref + preview allowed")
+	}
+}
+
+func TestIntegration_ArtifactSizeLimit(t *testing.T) {
+	ts, _ := setupServer(t)
+
+	result, _ := apiRequest(t, ts, "POST", "/threads", map[string]string{"name": "size-test"})
+	threadID := result["thread_id"].(string)
+
+	// 51MB content — must be rejected with 413.
+	hugeContent := strings.Repeat("x", 51<<20)
+	_, status := apiRequest(t, ts, "POST", "/threads/"+threadID+"/artifacts", map[string]any{
+		"name": "huge.txt", "type": "text", "mime": "text/plain",
+		"content": hugeContent,
+	})
+	if status != 413 {
+		t.Errorf("expected 413 for artifact > 50MB, got %d", status)
+	}
+}
+
+func TestIntegration_ContentEndpointRequiresAcceptHeader(t *testing.T) {
+	ts, _ := setupServer(t)
+
+	result, _ := apiRequest(t, ts, "POST", "/threads", map[string]string{"name": "content-test"})
+	threadID := result["thread_id"].(string)
+
+	artResult, _ := apiRequest(t, ts, "POST", "/threads/"+threadID+"/artifacts", map[string]any{
+		"name": "doc.txt", "type": "text", "mime": "text/plain", "content": "hello relay",
+	})
+	ref := artResult["ref"].(string)
+
+	// Without Accept header — must be rejected.
+	req, _ := http.NewRequest("GET", ts.URL+"/threads/"+threadID+"/artifacts/"+ref+"/content", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != 406 {
+		t.Errorf("expected 406 without Accept header, got %d", resp.StatusCode)
+	}
+
+	// With correct Accept header — must succeed.
+	req2, _ := http.NewRequest("GET", ts.URL+"/threads/"+threadID+"/artifacts/"+ref+"/content", nil)
+	req2.Header.Set("Accept", "application/octet-stream")
+	resp2, _ := http.DefaultClient.Do(req2)
+	resp2.Body.Close()
+	if resp2.StatusCode != 200 {
+		t.Errorf("expected 200 with Accept: application/octet-stream, got %d", resp2.StatusCode)
+	}
+}
+
 func TestIntegration_Health(t *testing.T) {
 	ts, _ := setupServer(t)
 

@@ -339,12 +339,14 @@ func generatePreview(content []byte, atype ArtifactType) Preview {
 	p.LineCount = len(lines)
 
 	if len(text) > MaxPreviewBytes {
-		// Truncate to max bytes on a line boundary
-		trunc := text[:MaxPreviewBytes]
+		// Truncate to max bytes (leaving room for "\n...") on a line boundary.
+		const ellipsis = "\n..."
+		limit := MaxPreviewBytes - len(ellipsis)
+		trunc := text[:limit]
 		if idx := strings.LastIndex(trunc, "\n"); idx > 0 {
 			trunc = trunc[:idx]
 		}
-		p.Text = trunc
+		p.Text = trunc + ellipsis
 		p.Truncated = true
 	} else {
 		p.Text = text
