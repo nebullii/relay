@@ -1,6 +1,6 @@
-# Binary
-relay
-relay.exe
+# Binary (root only, not cmd/relay/ directory)
+/relay
+/relay.exe
 dist/
 
 # Go
