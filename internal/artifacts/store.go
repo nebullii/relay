@@ -188,10 +188,10 @@ func (s *Store) Get(threadID, ref string) (*Artifact, error) {
 	return &art, nil
 }
 
-// List returns all artifacts for a thread.
+// List returns all artifacts for a thread, including preview metadata.
 func (s *Store) List(threadID string) ([]*Artifact, error) {
 	rows, err := s.db.Query(`
-		SELECT ref, type, mime, name, size, hash, created_at
+		SELECT ref, type, mime, name, size, hash, preview, created_at
 		FROM artifacts WHERE thread_id = ? ORDER BY created_at DESC
 	`, threadID)
 	if err != nil {
@@ -202,12 +202,13 @@ func (s *Store) List(threadID string) ([]*Artifact, error) {
 	var arts []*Artifact
 	for rows.Next() {
 		var art Artifact
-		var createdAt string
-		if err := rows.Scan(&art.Ref, &art.Type, &art.Mime, &art.Name, &art.Size, &art.Hash, &createdAt); err != nil {
+		var createdAt, previewJSON string
+		if err := rows.Scan(&art.Ref, &art.Type, &art.Mime, &art.Name, &art.Size, &art.Hash, &previewJSON, &createdAt); err != nil {
 			return nil, err
 		}
 		art.ThreadID = threadID
 		art.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		_ = json.Unmarshal([]byte(previewJSON), &art.Preview)
 		arts = append(arts, &art)
 	}
 	return arts, nil

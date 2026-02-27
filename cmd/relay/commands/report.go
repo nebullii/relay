@@ -78,38 +78,52 @@ func statsCmd() *cobra.Command {
 			}
 			_ = client.Get("/threads/"+threadID+"/events", &evResult)
 
-			// Calculate token stats
+			// Compute token stats live from artifact data.
+			// naive  = sum(artifact.size) / 4          — what you'd pay if pasting everything
+			// actual = sum(len(preview.text)) / 4      — what relay actually sends (bounded preview text)
 			naiveTokens := 0
+			actualTokens := 0
 			for _, a := range artResult.Artifacts {
 				if size, ok := a["size"].(float64); ok {
 					naiveTokens += int(size) / 4
 				}
+				if preview, ok := a["preview"].(map[string]any); ok {
+					if text, ok := preview["text"].(string); ok {
+						actualTokens += len(text) / 4
+					}
+				}
+			}
+			avoided := naiveTokens - actualTokens
+			var reductionPct float64
+			if naiveTokens > 0 {
+				reductionPct = float64(avoided) / float64(naiveTokens) * 100
 			}
 
 			cacheHits := 0
+			cacheMisses := 0
 			for _, ev := range evResult.Events {
 				if ev["type"] == "capability.invoked" {
 					if payload, ok := ev["payload"].(map[string]any); ok {
 						if hit, _ := payload["cache_hit"].(bool); hit {
 							cacheHits++
+						} else {
+							cacheMisses++
 						}
 					}
 				}
 			}
 
-			metrics := map[string]any{}
-			if m, ok := header["metrics"].(map[string]any); ok {
-				metrics = m
-			}
-
 			fmt.Printf("  Thread: %s\n\n", threadID)
-			fmt.Printf("  %-30s %d\n", "artifacts", len(artResult.Artifacts))
-			fmt.Printf("  %-30s %d\n", "events", len(evResult.Events))
-			fmt.Printf("  %-30s %d\n", "naive tokens (if pasted)", naiveTokens)
-			fmt.Printf("  %-30s %v\n", "cache hits", metrics["cache_hits"])
-			fmt.Printf("  %-30s %v\n", "cache misses", metrics["cache_misses"])
-			fmt.Printf("  %-30s %v\n", "tokens avoided", metrics["tokens_avoided"])
-			fmt.Printf("  %-30s %d\n", "session cache hits", cacheHits)
+			fmt.Printf("  %-32s %d\n", "artifacts", len(artResult.Artifacts))
+			fmt.Printf("  %-32s %d\n", "events", len(evResult.Events))
+			fmt.Printf("\n  Token savings (computed from artifact data):\n")
+			fmt.Printf("  %-32s %d\n", "naive tokens (if pasted)", naiveTokens)
+			fmt.Printf("  %-32s %d\n", "actual tokens (previews only)", actualTokens)
+			fmt.Printf("  %-32s %d\n", "tokens avoided", avoided)
+			fmt.Printf("  %-32s %.1f%%\n", "reduction", reductionPct)
+			fmt.Printf("\n  Cache (this session):\n")
+			fmt.Printf("  %-32s %d\n", "cache hits", cacheHits)
+			fmt.Printf("  %-32s %d\n", "cache misses", cacheMisses)
 			return nil
 		},
 	}
