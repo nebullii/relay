@@ -48,6 +48,7 @@ Quick start:
 		exportCmd(),
 		importCmd(),
 		statsCmd(),
+		proxyCmd(),
 		DaemonRunCmd(),
 	)
 
