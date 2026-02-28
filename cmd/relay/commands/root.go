@@ -21,35 +21,32 @@ Agents never re-send memory. Everything is stored once and referenced by ID.
 
 Quick start:
   relay init          Initialize config and storage
-  relay up            Start the daemon
   relay thread new    Create a new thread
-  relay open <id>     Open thread in browser UI`,
+  relay "<prompt>"    Run a prompt with bounded memory`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return cmd.Help()
+			}
+			return runPrompt(args, "", "", true, false)
+		},
 	}
 
 	// Register all subcommands
 	rootCmd.AddCommand(
 		versionCmd(),
 		initCmd(),
-		upCmd(),
-		downCmd(),
-		statusCmd(),
-		doctorCmd(),
 		threadCmd(),
+		runCmd(),
+		wrapCmd(),
+		promptCmd(),
 		artifactCmd(),
 		stateCmd(),
-		capCmd(),
 		runsCmd(),
 		showCmd(),
-		tailCmd(),
 		reportCmd(),
-		openCmd(),
-		exportCmd(),
-		importCmd(),
 		statsCmd(),
-		proxyCmd(),
-		DaemonRunCmd(),
 	)
 
 	return rootCmd

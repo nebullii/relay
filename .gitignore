@@ -1,34 +1,9 @@
-# Binary (root only, not cmd/relay/ directory)
+.env
+/tests/rpb_1.json
+/tests/rpb_2.json
+/tests/smoke_1mb.bin
+/tests/smoke_m1_debug.log
+/.relayhome/
+/dist/
 /relay
-/relay.exe
-dist/
-
-# Go
-*.test
-*.out
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-dist/
-
-# Node
-node_modules/
-sdk/ts/relay-client/dist/
-
-# Runtime data
-~/.relay/
-*.db
-*.pid
-*.log
-
-# macOS
-.DS_Store
-
-# Editor
-.vscode/
-.idea/
-*.swp
+/sdk/python/relay_client/__pycache__/

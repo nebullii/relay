@@ -13,7 +13,7 @@ caching, and trace/replay.
                     │ context again:  │              │ artifact_ref:   │
                     │ [1000 tokens]   │              │   abc123        │
                     │ [2000 tokens]   │              └────────┬────────┘
-                    │ [3000 tokens]   │                       │ daemon
+                    │ [3000 tokens]   │                       │ local store
                     └─────────────────┘              ┌────────▼────────┐
   agent B ◀──────── [re-reads it all] │  agent B ◀── │ preview: {…}    │
                                       │              │ full: abc123    │
@@ -26,8 +26,7 @@ Modern agent systems re-send context on every hop. A 10-step agent loop
 with 4KB of accumulated context sends ~40KB total — most of it duplicated.
 relay cuts this to ~4KB by storing memory once and referencing it by ID.
 
-The savings compound: with caching, a capability invoked 5 times sends
-its payload once and serves refs four more times.
+The savings compound as artifacts accumulate and only previews are sent.
 
 ---
 
@@ -37,34 +36,23 @@ its payload once and serves refs four more times.
 # 1. Build
 git clone https://github.com/relaydev/relay
 cd relay
-make build
+go build -o relay ./cmd/relay
 
-# 2. Start
+# 2. Init local storage
 ./relay init
-./relay up
-#  relay daemon started
-#  url: http://localhost:7474
 
-# 3. Create a thread
-./relay thread new --name "my-first-run"
-#  thread_id  550e8400-e29b-41d4-a716-446655440000
+# 3. Run a prompt (auto-creates a thread)
+./relay "summarize this repo"
 
 # 4. Store an artifact (returns ref, not content)
 echo "# My Notes\nHello, relay." > notes.md
+./relay thread new --name "my-first-run"
+#  thread_id  550e8400-e29b-41d4-a716-446655440000
 ./relay artifact put notes.md --thread <thread_id> --type markdown
 #  artifact_ref  01914a2b3c4d5e6f7890...
-
-# 5. Search it
-./relay cap invoke retrieval.search --thread <thread_id> \
-  --json '{"query":"hello"}'
-#  artifact_ref  ...
-#  preview: {"count":1,"results":[...]}
-
-# 6. Open the UI
-./relay open <thread_id>
 ```
 
-That's it. Your data never left your machine. No signup. No cloud.
+That's it. Your data never leaves your machine. No signup. No daemon. No cloud.
 
 ---
 
@@ -121,28 +109,7 @@ provenance: { created_by, created_at, capability }
 ```
 
 Long content is **never inserted into prompts** by default — only previews.
-The ref is sent; the daemon serves content on demand.
-
-### A2A protocol
-
-Internal agent messages use a typed envelope:
-
-```json
-{
-  "msg_id":          "...",
-  "thread_id":       "...",
-  "from":            "agent-a",
-  "to_capability":   "retrieval.search",
-  "type":            "request",
-  "schema":          "com.relay.a2a.envelope.v1",
-  "payload":         { ... max 16KB ... },
-  "idempotency_key": "...",
-  "timestamp":       "...",
-  "ttl":             300
-}
-```
-
-Enforced limits: max payload 16KB, notes max 280 chars, big content must be `artifact_ref`.
+The ref is sent; content stays on disk.
 
 ---
 
@@ -151,18 +118,12 @@ Enforced limits: max payload 16KB, notes max 280 chars, big content must be `art
 ```
 Setup
   relay init                        Initialize config and storage
-  relay up                          Start daemon in background
-  relay down                        Stop daemon
-  relay status                      Show daemon status
-  relay doctor                      Run diagnostics
   relay version                     Print version
 
 Threads
   relay thread new [--name <name>]  Create a thread, print thread_id
   relay runs                        List recent threads
   relay show <thread_id>            Show thread summary
-  relay tail <thread_id>            Stream events (like tail -f)
-  relay open <thread_id>            Open web UI in browser
 
 State
   relay state header --thread <id>  Get bounded state header (token-efficient)
@@ -173,150 +134,10 @@ Artifacts
   relay artifact put  <file> --thread <id> [--type <type>]
   relay artifact get  <ref>  --thread <id> [--out <path>]
 
-Capabilities
-  relay cap list                    List available capabilities
-  relay cap invoke <cap> --thread <id> --json '{"key":"val"}'
-
 Reports & Stats
   relay report <thread_id> [--format md|json]
   relay stats  <thread_id>
-
-Import / Export
-  relay export <thread_id> --out bundle.zip
-  relay import bundle.zip
 ```
-
----
-
-## API
-
-The daemon exposes a REST API at `http://localhost:7474`:
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/threads` | Create thread |
-| GET  | `/threads` | List threads |
-| GET  | `/threads/{id}` | Thread detail |
-| GET  | `/threads/{id}/state` | Full state |
-| GET  | `/threads/{id}/state/header` | Bounded header |
-| POST | `/threads/{id}/state/patch` | Apply JSON Patch |
-| POST | `/threads/{id}/artifacts` | Upload artifact |
-| GET  | `/threads/{id}/artifacts` | List artifacts |
-| GET  | `/threads/{id}/artifacts/{ref}` | Get artifact |
-| GET  | `/threads/{id}/artifacts/{ref}?raw=1` | Download content |
-| GET  | `/threads/{id}/events` | List events |
-| POST | `/cap/invoke` | Invoke capability |
-| GET  | `/cap/list` | List capabilities |
-| POST | `/reports/{id}` | Generate report |
-| GET  | `/health` | Health check |
-| GET  | `/version` | Version info |
-| GET  | `/ui/` | Web UI |
-
----
-
-## Python SDK
-
-```python
-pip install ./sdk/python
-
-from relay_client import RelayClient
-
-client = RelayClient("http://localhost:7474")
-
-# Create thread
-thread = client.thread_new("my-run")
-tid = thread["thread_id"]
-
-# Store content as artifact (get ref back, not content)
-art = client.artifact_put(tid, "analysis.md", "# Analysis\n...", "markdown")
-ref = art["ref"]  # use this, not the content
-
-# Update state by ref
-client.state_patch(tid, [
-    {"op": "add", "path": "/artifacts/-", {"ref": ref, "type": "markdown"}},
-    {"op": "add", "path": "/facts/-",     {"id": "f1", "key": "phase", "value": "done"}},
-])
-
-# Get token-efficient header (not full state)
-header = client.state_header(tid)
-
-# Invoke capability — returns preview + ref
-result = client.cap_invoke(tid, "retrieval.search", {"query": "analysis"})
-print(result["preview"])   # small JSON
-print(result["artifact_ref"])  # full results, by ref
-
-# Generate report
-report = client.report(tid)
-print(f"Tokens avoided: {report['token_savings']['avoided_tokens']}")
-```
-
----
-
-## TypeScript SDK
-
-```typescript
-import { RelayClient } from "@relay/client";
-
-const client = new RelayClient("http://localhost:7474");
-
-const thread = await client.threadNew("my-run");
-const tid = thread.thread_id;
-
-const art = await client.artifactPut(tid, "notes.md", "# Notes\n...", "markdown");
-await client.statePatch(tid, [
-  { op: "add", path: "/artifacts/-", value: { ref: art.ref, type: "markdown" } },
-]);
-
-const header = await client.stateHeader(tid);  // token-efficient
-const result = await client.capInvoke(tid, "retrieval.search", { query: "notes" });
-console.log(result.preview);
-
-// Stream events
-for await (const ev of client.tail(tid)) {
-  console.log(ev.type, ev.payload);
-}
-```
-
----
-
-## Plugin authoring
-
-Plugins register capabilities with a name, schema, and handler.
-
-```go
-// Register a custom capability
-cap := &plugins.Capability{
-    Name:        "my.tool",
-    Description: "Does something useful",
-    ArgsSchema:  json.RawMessage(`{"type":"object","properties":{"input":{"type":"string"}}}`),
-    Cacheable:   true,
-    CacheTTLSec: 300,
-}
-
-handler := func(req *plugins.InvokeRequest) (*plugins.InvokeResult, error) {
-    var args struct{ Input string `json:"input"` }
-    json.Unmarshal(req.Args, &args)
-
-    // Do work...
-    result := process(args.Input)
-
-    // Store full result as artifact (return preview + ref, not full content)
-    ref, _ := storer.StoreText(req.ThreadID, "output.json", result, "my.tool")
-    preview, _ := json.Marshal(map[string]any{"summary": result[:100]})
-
-    return &plugins.InvokeResult{
-        Capability:  req.Capability,
-        Preview:     preview,
-        ArtifactRef: ref,
-    }, nil
-}
-
-registry.Register(cap, handler)
-```
-
-Built-in capabilities:
-- `retrieval.search` — full-text search over thread artifacts
-- `http.fetch` — fetch URL, store body as artifact, return bounded preview
 
 ---
 
@@ -337,7 +158,7 @@ relay stats <thread_id>
 
 The formula:
 - **naive**: sum of artifact sizes / 4 (chars-per-token estimate)
-- **actual**: header size + preview sizes
+- **actual**: preview sizes / 4
 - **avoided**: naive − actual
 
 ---
@@ -348,8 +169,6 @@ The formula:
 ~/.relay/
   config.json             Client configuration
   relay.db                SQLite: state, artifacts, events, cache
-  daemon.pid              Daemon PID
-  daemon.log              Daemon log
   threads/
     <thread_id>/
       state.json          Current state (human-readable)
@@ -369,44 +188,8 @@ Everything is transparent. Open `~/.relay/threads/<id>/state.json` in any editor
 relay is local-first by design:
 
 - All data stays on your machine in `~/.relay/`
-- Optional API token for local calls (`relay init` generates one)
 - Artifact previews are sanitized: prompt injection patterns are stripped
-- Hop limits prevent infinite loops (default: 50 hops/thread)
-- Payload size limits on A2A messages (default: 16KB)
-- v1 is single-tenant ("local"); multi-tenant auth is architected in
-
----
-
-## Troubleshooting
-
-**Daemon won't start**
-```bash
-relay doctor       # check ports, permissions, storage
-relay status       # check daemon state
-cat ~/.relay/daemon.log  # check logs
-```
-
-**Port conflict**
-relay automatically tries the next available port. Check `relay status` for the actual port.
-
-**Storage issues**
-```bash
-ls -la ~/.relay/
-relay doctor
-```
-
-**Permission errors**
-```bash
-chmod -R 755 ~/.relay/
-```
-
-**Reset everything**
-```bash
-relay down
-rm -rf ~/.relay/
-relay init
-relay up
-```
+- Compaction keeps state bounded over long sessions
 
 ---
 

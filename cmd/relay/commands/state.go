@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/relaydev/relay/internal/state"
 	"github.com/spf13/cobra"
 )
 
@@ -31,9 +32,14 @@ func stateHeaderCmd() *cobra.Command {
 				return fmt.Errorf("--thread is required")
 			}
 
-			client := NewClient(cfg)
-			var header map[string]any
-			if err := client.Get("/threads/"+threadID+"/state/header", &header); err != nil {
+			eng, err := openEngine(cfg)
+			if err != nil {
+				return err
+			}
+			defer eng.Close()
+
+			header, err := eng.StateHeader(threadID)
+			if err != nil {
 				return err
 			}
 
@@ -82,21 +88,26 @@ func statePatchCmd() *cobra.Command {
 			}
 
 			// Validate JSON
-			var ops []map[string]any
+			var ops []state.PatchOp
 			if err := json.Unmarshal(rawPatch, &ops); err != nil {
 				return fmt.Errorf("invalid patch JSON: %w", err)
 			}
 
-			client := NewClient(cfg)
-			var result map[string]any
-			if err := client.Post("/threads/"+threadID+"/state/patch", ops, &result); err != nil {
+			eng, err := openEngine(cfg)
+			if err != nil {
+				return err
+			}
+			defer eng.Close()
+
+			next, err := eng.PatchState(threadID, ops)
+			if err != nil {
 				return fmt.Errorf("patch failed: %w", err)
 			}
 
 			fmt.Printf("  state updated\n")
-			fmt.Printf("  version    %v\n", result["version"])
-			fmt.Printf("  state_ref  %v\n", result["state_ref"])
-			fmt.Printf("  updated_at %v\n", result["updated_at"])
+			fmt.Printf("  version    %v\n", next.Version)
+			fmt.Printf("  state_ref  v%v\n", next.Version)
+			fmt.Printf("  updated_at %v\n", next.UpdatedAt)
 			return nil
 		},
 	}

@@ -1,16 +1,13 @@
 package commands
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
-	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/relaydev/relay/internal/artifacts"
 	"github.com/spf13/cobra"
 )
 
@@ -49,55 +46,34 @@ func artifactPutCmd() *cobra.Command {
 			}
 			defer f.Close()
 
-			// Build multipart form
-			var body bytes.Buffer
-			writer := multipart.NewWriter(&body)
-
-			part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+			eng, err := openEngine(cfg)
 			if err != nil {
 				return err
 			}
-			if _, err := io.Copy(part, f); err != nil {
-				return err
-			}
-			if artType != "" {
-				writer.WriteField("type", artType)
-			}
-			writer.Close()
+			defer eng.Close()
 
-			// Post with multipart
-			url := fmt.Sprintf("%s/threads/%s/artifacts", DaemonURL(cfg), threadID)
-			req, err := http.NewRequest("POST", url, &body)
+			atype := artifacts.ArtifactType(artType)
+			if atype == "" {
+				atype = artifacts.TypeBinary
+			}
+			mime := "application/octet-stream"
+			if atype != artifacts.TypeBinary {
+				mime = "text/plain"
+			}
+
+			prov := artifacts.Provenance{
+				CreatedBy: "cli",
+				CreatedAt: time.Now().UTC(),
+			}
+			art, err := eng.ArtifactPut(threadID, filepath.Base(filePath), atype, mime, f, prov)
 			if err != nil {
 				return err
 			}
-			req.Header.Set("Content-Type", writer.FormDataContentType())
-			if cfg.APIToken != "" {
-				req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-			}
 
-			httpClient := &http.Client{Timeout: 60 * time.Second}
-			resp, err := httpClient.Do(req)
-			if err != nil {
-				return fmt.Errorf("upload: %w", err)
-			}
-			defer resp.Body.Close()
-
-			respData, _ := io.ReadAll(resp.Body)
-			if resp.StatusCode >= 400 {
-				return fmt.Errorf("upload failed: %s", string(respData))
-			}
-
-			var result map[string]any
-			if err := json.Unmarshal(respData, &result); err != nil {
-				fmt.Printf("  uploaded: %s\n", string(respData))
-				return nil
-			}
-
-			fmt.Printf("  artifact_ref  %v\n", result["ref"])
-			fmt.Printf("  type          %v\n", result["type"])
-			fmt.Printf("  size          %v bytes\n", result["size"])
-			fmt.Printf("  hash          %v\n", result["hash"])
+			fmt.Printf("  artifact_ref  %v\n", art.Ref)
+			fmt.Printf("  type          %v\n", art.Type)
+			fmt.Printf("  size          %v bytes\n", art.Size)
+			fmt.Printf("  hash          %v\n", art.Hash)
 			return nil
 		},
 	}
@@ -126,24 +102,11 @@ func artifactGetCmd() *cobra.Command {
 			}
 
 			ref := args[0]
-			url := fmt.Sprintf("%s/threads/%s/artifacts/%s?raw=1", DaemonURL(cfg), threadID, ref)
-
-			req, _ := http.NewRequest("GET", url, nil)
-			if cfg.APIToken != "" {
-				req.Header.Set("Authorization", "Bearer "+cfg.APIToken)
-			}
-
-			httpClient := &http.Client{Timeout: 60 * time.Second}
-			resp, err := httpClient.Do(req)
+			eng, err := openEngine(cfg)
 			if err != nil {
-				return fmt.Errorf("download: %w", err)
+				return err
 			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode >= 400 {
-				data, _ := io.ReadAll(resp.Body)
-				return fmt.Errorf("download failed: %s", string(data))
-			}
+			defer eng.Close()
 
 			var out io.Writer = os.Stdout
 			if outPath != "" {
@@ -155,7 +118,11 @@ func artifactGetCmd() *cobra.Command {
 				out = outFile
 			}
 
-			n, err := io.Copy(out, resp.Body)
+			data, err := eng.ArtifactContent(threadID, ref)
+			if err != nil {
+				return fmt.Errorf("download failed: %w", err)
+			}
+			n, err := out.Write(data)
 			if err != nil {
 				return fmt.Errorf("write output: %w", err)
 			}

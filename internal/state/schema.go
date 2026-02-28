@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -10,18 +11,19 @@ const SchemaVersion = "com.relay.state.v1"
 
 // State is the canonical memory for a thread.
 type State struct {
-	Schema        string         `json:"$schema"`
-	Version       int            `json:"version"`
-	ThreadID      string         `json:"thread_id"`
-	UpdatedAt     time.Time      `json:"updated_at"`
-	Facts         []Fact         `json:"facts"`
-	Constraints   []Constraint   `json:"constraints"`
-	OpenQuestions []Question     `json:"open_questions"`
-	Decisions     []Decision     `json:"decisions"`
-	Plan          []PlanStep     `json:"plan"`
-	Artifacts     []ArtifactRef  `json:"artifacts"`
-	LastActions   []Action       `json:"last_actions"`
-	Metrics       Metrics        `json:"metrics"`
+	Schema         string        `json:"$schema"`
+	Version        int           `json:"version"`
+	ThreadID       string        `json:"thread_id"`
+	UpdatedAt      time.Time     `json:"updated_at"`
+	SessionSummary string        `json:"session_summary,omitempty"`
+	Facts          []Fact        `json:"facts"`
+	Constraints    []Constraint  `json:"constraints"`
+	OpenQuestions  []Question    `json:"open_questions"`
+	Decisions      []Decision    `json:"decisions"`
+	Plan           []PlanStep    `json:"plan"`
+	Artifacts      []ArtifactRef `json:"artifacts"`
+	LastActions    []Action      `json:"last_actions"`
+	Metrics        Metrics       `json:"metrics"`
 }
 
 type Fact struct {
@@ -83,6 +85,7 @@ type Header struct {
 	Schema         string        `json:"$schema"`
 	ThreadID       string        `json:"thread_id"`
 	Version        int           `json:"version"`
+	SessionSummary string        `json:"session_summary,omitempty"`
 	TopFacts       []Fact        `json:"top_facts"`
 	TopConstraints []Constraint  `json:"top_constraints"`
 	OpenQuestions  []Question    `json:"open_questions"`
@@ -132,6 +135,7 @@ func (s *State) Header() *Header {
 		Version:  s.Version,
 		Metrics:  s.Metrics,
 	}
+	h.SessionSummary = s.SessionSummary
 
 	// Bounded facts — keep newest, drop oldest when over limit.
 	facts := s.Facts
@@ -168,17 +172,25 @@ func (s *State) Header() *Header {
 	}
 
 	// Recent artifacts.
-	artifacts := s.Artifacts
+	artifacts := append([]ArtifactRef(nil), s.Artifacts...)
 	if len(artifacts) > MaxHeaderArtifacts {
 		artifacts = artifacts[len(artifacts)-MaxHeaderArtifacts:]
 	}
+	// Deterministic order
+	sort.Slice(artifacts, func(i, j int) bool {
+		if artifacts[i].Ref != artifacts[j].Ref {
+			return artifacts[i].Ref < artifacts[j].Ref
+		}
+		return artifacts[i].Name < artifacts[j].Name
+	})
 	h.ArtifactRefs = artifacts
 
 	// Recent actions.
-	actions := s.LastActions
+	actions := append([]Action(nil), s.LastActions...)
 	if len(actions) > MaxHeaderActions {
 		actions = actions[len(actions)-MaxHeaderActions:]
 	}
+	sortActionsDeterministic(actions)
 	h.LastActions = actions
 
 	// Hard JSON size cap: drop oldest facts one by one until header fits.

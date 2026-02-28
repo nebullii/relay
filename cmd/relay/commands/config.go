@@ -8,25 +8,19 @@ import (
 )
 
 const (
-	DefaultPort     = 7474
-	DefaultDaemonHost = "http://localhost"
-	Version         = "1.0.0"
+	Version = "1.0.0"
 )
 
 // Config holds the relay client configuration.
 type Config struct {
-	Port     int    `json:"port"`
-	BaseDir  string `json:"base_dir"`
-	APIToken string `json:"api_token"`
-	Host     string `json:"host"`
+	BaseDir         string `json:"base_dir"`
+	DefaultThreadID string `json:"default_thread_id,omitempty"`
 }
 
 func DefaultConfig() *Config {
 	home, _ := os.UserHomeDir()
 	return &Config{
-		Port:    DefaultPort,
 		BaseDir: filepath.Join(home, ".relay"),
-		Host:    DefaultDaemonHost,
 	}
 }
 
@@ -62,12 +56,4 @@ func SaveConfig(cfg *Config) error {
 		return err
 	}
 	return os.WriteFile(ConfigPath(), data, 0600)
-}
-
-func DaemonURL(cfg *Config) string {
-	return fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-}
-
-func PIDFile(cfg *Config) string {
-	return filepath.Join(cfg.BaseDir, "daemon.pid")
 }

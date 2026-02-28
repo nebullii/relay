@@ -11,8 +11,8 @@ import (
 
 // Store manages state persistence for threads.
 type Store struct {
-	db       *sql.DB
-	baseDir  string
+	db      *sql.DB
+	baseDir string
 }
 
 func NewStore(db *sql.DB, baseDir string) *Store {
@@ -91,6 +91,10 @@ func (s *Store) Patch(threadID string, ops []PatchOp) (*State, error) {
 	next, err := ApplyPatch(current, ops)
 	if err != nil {
 		return nil, fmt.Errorf("apply patch: %w", err)
+	}
+
+	if err := Compact(next); err != nil {
+		return nil, err
 	}
 
 	if err := s.Put(next); err != nil {
